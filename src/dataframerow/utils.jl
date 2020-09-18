@@ -151,10 +151,18 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
     # and this method needs to allocate a groups vector anyway
     @assert groups !== nothing && all(col -> length(col) == length(groups), cols)
 
+    refpools = map(DataAPI.refpool, cols)
+    foreach(refpool -> @assert(allunique(refpool)), refpools)
+
     # If skipmissing=true, rows with missings all go to group 0,
     # which will be removed by functions down the stream
-    ngroupstup = map(cols) do c
-        nlevels(c) + (!skipmissing && eltype(c) >: Missing)
+    ngroupstup = map(refpools) do refpool
+        len = length(refpool)
+        if skipmissing && eltype(refpool) >: Missing && any(ismissing, refpool)
+            return len - 1
+        else
+            return len
+        end
     end
     ngroups = prod(ngroupstup)
 
@@ -173,29 +181,36 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
     end
 
     seen = fill(false, ngroups)
+    refs = map(DataAPI.refarray, cols)
+    firstinds = map(firstindex, refpools)
     # Compute vector mapping missing to -1 if skipmissing=true
-    refmaps = map(cols) do col
-        nlevs = nlevels(col)
-        refmap = collect(-1:(nlevs-1))
-        # First value in refmap is only used by CategoricalArray
-        # (corresponds to ref 0, i.e. missing values)
-        refmap[1] = skipmissing ? -1 : nlevs
-        if col isa PooledArray{>: Missing} && skipmissing
-            missingind = get(col.invpool, missing, 0)
-            if missingind > 0
-                refmap[missingind+1] = -1
-                refmap[missingind+2:end] .-= 1
+    refmaps = map(cols, refpools) do col, refpool
+        refmap = collect(0:length(refpool)-1)
+        if skipmissing
+            missingind = findfirst(ismissing, refpool)
+            nm = collect(eachindex(refpool))
+            fi = firstindex(refpool)
+            if missingind !== nothing
+                missingind = something(missingind)
+                refmap[missingind-fi+1] = -1
+                refmap[missingind-fi+2:end] .-= 1
+                nm = setdiff!(nm, missingind)
             end
+            perm = sortperm(view(refpool, nm))
+            invpermute!(view(refmap, nm .- fi .+ 1), perm)
+        else
+            perm = sortperm(collect(refpool))
+            invpermute!(refmap, perm)
         end
         refmap
     end
     strides = (cumprod(collect(reverse(ngroupstup)))[end-1:-1:1]..., 1)::NTuple{N,Int}
     @inbounds for i in eachindex(groups)
-        local refs
+        local refs_i
         let i=i # Workaround for julia#15276
-            refs = map(c -> c.refs[i], cols)
+            refs_i = map(c -> c[i], refs)
         end
-        vals = map((m, r, s) -> m[r+1] * s, refmaps, refs, strides)
+        vals = map((m, r, s, fi) -> m[r-fi+1] * s, refmaps, refs_i, strides, firstinds)
         j = sum(vals) + 1
         # x < 0 happens with -1 in refmap, which corresponds to missing
         if skipmissing && any(x -> x < 0, vals)
