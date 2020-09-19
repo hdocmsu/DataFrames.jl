@@ -181,45 +181,72 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
 
     seen = fill(false, ngroups)
     refs = map(DataAPI.refarray, cols)
-    firstinds = map(firstindex, refpools)
-    # Compute vector mapping missing to -1 if skipmissing=true
-    refmaps = map(cols, refpools) do col, refpool
-        refmap = collect(0:length(refpool)-1)
-        if skipmissing
-            missingind = findfirst(ismissing, refpool)
-            fi = firstindex(refpool)
-            if missingind !== nothing
-                mi = something(missingind)
-                refmap[mi-fi+1] = -1
-                refmap[mi-fi+2:end] .-= 1
-            end
-            if sort
-                nm = missingind === nothing ? eachindex(refpool) :
-                    setdiff(eachindex(refpool), something(missingind))
-                perm = sortperm(view(refpool, nm))
-                invpermute!(view(refmap, nm .- fi .+ 1), perm)
-            end
-        elseif sort
-            perm = sortperm(collect(refpool))
-            invpermute!(refmap, perm)
-        end
-        refmap
-    end
     strides = (cumprod(collect(reverse(ngroupstup)))[end-1:-1:1]..., 1)::NTuple{N,Int}
-    @inbounds for i in eachindex(groups)
-        local refs_i
-        let i=i # Workaround for julia#15276
-            refs_i = map(c -> c[i], refs)
+    firstinds = map(firstindex, refpools)
+    missinginds = map(refpools) do refpool
+        something(findfirst(ismissing, refpool), lastindex(refpool)+1)
+    end
+    if sort
+        # Compute vector mapping missing to -1 if skipmissing=true
+        refmaps = map(cols, refpools, missinginds) do col, refpool, missingind
+            refmap = collect(0:length(refpool)-1)
+            if skipmissing
+                fi = firstindex(refpool)
+                if missingind !== nothing
+                    mi = something(missingind)
+                    refmap[mi-fi+1] = -1
+                    refmap[mi-fi+2:end] .-= 1
+                end
+                if sort
+                    nm = missingind === nothing ? eachindex(refpool) :
+                        setdiff(eachindex(refpool), something(missingind))
+                    perm = sortperm(view(refpool, nm))
+                    invpermute!(view(refmap, nm .- fi .+ 1), perm)
+                end
+            elseif sort
+                perm = sortperm(collect(refpool))
+                invpermute!(refmap, perm)
+            end
+            refmap
         end
-        vals = map((m, r, s, fi) -> m[r-fi+1] * s, refmaps, refs_i, strides, firstinds)
-        j = sum(vals) + 1
-        # x < 0 happens with -1 in refmap, which corresponds to missing
-        if skipmissing && any(x -> x < 0, vals)
-            j = 0
-        else
-            seen[j] = true
+        @inbounds for i in eachindex(groups)
+            local refs_i
+            let i=i # Workaround for julia#15276
+                refs_i = map(c -> c[i], refs)
+            end
+            vals = map((m, r, s, fi) -> m[r-fi+1] * s, refmaps, refs_i, strides, firstinds)
+            j = sum(vals) + 1
+            # x < 0 happens with -1 in refmap, which corresponds to missing
+            if skipmissing && any(x -> x < 0, vals)
+                j = 0
+            else
+                seen[j] = true
+            end
+            groups[i] = j
         end
-        groups[i] = j
+    else
+        @inbounds for i in eachindex(groups)
+            local refs_i
+            let i=i # Workaround for julia#15276
+                refs_i = map(refs, missinginds) do refs, missingind
+                    r = Int(refs[i])
+                    if skipmissing
+                        return r == missingind ? -1 : (r > missingind ? r-1 : r)
+                    else
+                        return r
+                    end
+                end
+            end
+            vals = map((r, s, fi) -> (r-fi) * s, refs_i, strides, firstinds)
+            j = sum(vals) + 1
+            # x < 0 happens with -1, which corresponds to missing
+            if skipmissing && any(x -> x < 0, vals)
+                j = 0
+            else
+                seen[j] = true
+            end
+            groups[i] = j
+        end
     end
     if !all(seen) # Compress group indices to remove unused ones
         oldngroups = ngroups
