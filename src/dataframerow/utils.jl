@@ -94,7 +94,16 @@ isequal_row(cols1::Tuple{Vararg{AbstractVector}}, r1::Int,
 # 4) whether groups are already sorted
 # Optional `groups` vector is set to the group indices of each row (starting at 1)
 # With skipmissing=true, rows with missing values are attributed index 0.
+row_group_slots(cols::Tuple{Vararg{AbstractVector}},
+                hash::Val = Val(true),
+                groups::Union{Vector{Int}, Nothing} = nothing,
+                skipmissing::Bool = false,
+                sort::Bool = false)::Tuple{Int, Vector{UInt}, Vector{Int}, Bool} =
+    row_group_slots(cols, DataAPI.refpool.(cols), hash, groups, skipmissing, sort)
+
+# Generic fallback method based on open adressing hash table
 function row_group_slots(cols::Tuple{Vararg{AbstractVector}},
+                         refpools::Any,
                          hash::Val = Val(true),
                          groups::Union{Vector{Int}, Nothing} = nothing,
                          skipmissing::Bool = false,
@@ -141,7 +150,9 @@ function row_group_slots(cols::Tuple{Vararg{AbstractVector}},
     return ngroups, rhashes, gslots, false
 end
 
-function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}},
+# Optimized method for arrays for which DataAPI.refpool is defined and returns an AbstractVector
+function row_group_slots(cols::NTuple{N,<:AbstractVector},
+                         refpools::NTuple{N,<:AbstractVector},
                          hash::Val{false},
                          groups::Union{Vector{Int}, Nothing} = nothing,
                          skipmissing::Bool = false,
@@ -174,9 +185,9 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
     # but it needs to remain reasonable compared with the size of the data frame.
     if prod(Int128.(ngroupstup)) > typemax(Int) || ngroups > 2 * length(groups)
         return invoke(row_group_slots,
-                      Tuple{Tuple{Vararg{AbstractVector}}, Val,
+                      Tuple{Tuple{Vararg{AbstractVector}}, Any, Val,
                             Union{Vector{Int}, Nothing}, Bool, Bool},
-                      cols, hash, groups, skipmissing, sort)
+                      cols, refpools, hash, groups, skipmissing, sort)
     end
 
     seen = fill(false, ngroups)
@@ -228,8 +239,8 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
         @inbounds for i in eachindex(groups)
             local refs_i
             let i=i # Workaround for julia#15276
-                refs_i = map(refs, missinginds) do refs, missingind
-                    r = Int(refs[i])
+                refs_i = map(refs, missinginds) do ref, missingind
+                    r = Int(ref[i])
                     if skipmissing
                         return r == missingind ? -1 : (r > missingind ? r-1 : r)
                     else
