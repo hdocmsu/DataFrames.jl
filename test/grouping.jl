@@ -632,17 +632,6 @@ end
         dfs = [groupby_checked(dfb, [:Key1, :Key2, :Key3], sort=true, skipmissing=true)...]
         @test isequal_unordered(gd, dfs)
         @test issorted(vcat(gd...), [:Key1, :Key2, :Key3])
-
-        # This is an implementation detail but it allows checking
-        # that the optimized method is used
-        if df.Key1 isa CategoricalVector &&
-            df.Key2 isa CategoricalVector &&
-            df.Key3 isa CategoricalVector
-            @test groupby_checked(df, [:Key1, :Key2, :Key3], sort=true) ≅
-                groupby_checked(df, [:Key1, :Key2, :Key3], sort=false)
-            @test groupby_checked(df, [:Key1, :Key2, :Key3], sort=true, skipmissing=true) ≅
-                groupby_checked(df, [:Key1, :Key2, :Key3], sort=false, skipmissing=true)
-        end
     end
 end
 

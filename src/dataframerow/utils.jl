@@ -97,7 +97,8 @@ isequal_row(cols1::Tuple{Vararg{AbstractVector}}, r1::Int,
 function row_group_slots(cols::Tuple{Vararg{AbstractVector}},
                          hash::Val = Val(true),
                          groups::Union{Vector{Int}, Nothing} = nothing,
-                         skipmissing::Bool = false)::Tuple{Int, Vector{UInt}, Vector{Int}, Bool}
+                         skipmissing::Bool = false,
+                         sort::Bool = false)::Tuple{Int, Vector{UInt}, Vector{Int}, Bool}
     @assert groups === nothing || length(groups) == length(cols[1])
     rhashes, missings = hashrows(cols, skipmissing)
     # inspired by Dict code from base cf. https://github.com/JuliaData/DataTables.jl/pull/17#discussion_r102481481
@@ -140,13 +141,11 @@ function row_group_slots(cols::Tuple{Vararg{AbstractVector}},
     return ngroups, rhashes, gslots, false
 end
 
-nlevels(x::PooledArray) = length(x.pool)
-nlevels(x) = length(levels(x))
-
 function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}},
                          hash::Val{false},
                          groups::Union{Vector{Int}, Nothing} = nothing,
-                         skipmissing::Bool = false)::Tuple{Int, Vector{UInt}, Vector{Int}, Bool} where N
+                         skipmissing::Bool = false,
+                         sort::Bool = false)::Tuple{Int, Vector{UInt}, Vector{Int}, Bool} where N
     # Computing neither hashes nor groups isn't very useful,
     # and this method needs to allocate a groups vector anyway
     @assert groups !== nothing && all(col -> length(col) == length(groups), cols)
@@ -176,8 +175,8 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
     if prod(Int128.(ngroupstup)) > typemax(Int) || ngroups > 2 * length(groups)
         return invoke(row_group_slots,
                       Tuple{Tuple{Vararg{AbstractVector}}, Val,
-                            Union{Vector{Int}, Nothing}, Bool},
-                      cols, hash, groups, skipmissing)
+                            Union{Vector{Int}, Nothing}, Bool, Bool},
+                      cols, hash, groups, skipmissing, sort)
     end
 
     seen = fill(false, ngroups)
@@ -188,17 +187,19 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
         refmap = collect(0:length(refpool)-1)
         if skipmissing
             missingind = findfirst(ismissing, refpool)
-            nm = collect(eachindex(refpool))
             fi = firstindex(refpool)
             if missingind !== nothing
-                missingind = something(missingind)
-                refmap[missingind-fi+1] = -1
-                refmap[missingind-fi+2:end] .-= 1
-                nm = setdiff!(nm, missingind)
+                mi = something(missingind)
+                refmap[mi-fi+1] = -1
+                refmap[mi-fi+2:end] .-= 1
             end
-            perm = sortperm(view(refpool, nm))
-            invpermute!(view(refmap, nm .- fi .+ 1), perm)
-        else
+            if sort
+                nm = missingind === nothing ? eachindex(refpool) :
+                    setdiff(eachindex(refpool), something(missingind))
+                perm = sortperm(view(refpool, nm))
+                invpermute!(view(refmap, nm .- fi .+ 1), perm)
+            end
+        elseif sort
             perm = sortperm(collect(refpool))
             invpermute!(refmap, perm)
         end
@@ -235,8 +236,7 @@ function row_group_slots(cols::NTuple{N,<:Union{CategoricalVector,PooledVector}}
         # To catch potential bugs inducing unnecessary computations
         @assert oldngroups != ngroups
     end
-    sorted = all(col -> col isa CategoricalVector, cols)
-    return ngroups, UInt[], Int[], sorted
+    return ngroups, UInt[], Int[], sort
 end
 
 
@@ -282,7 +282,7 @@ end
 function group_rows(df::AbstractDataFrame)
     groups = Vector{Int}(undef, nrow(df))
     ngroups, rhashes, gslots, sorted =
-        row_group_slots(ntuple(i -> df[!, i], ncol(df)), Val(true), groups, false)
+        row_group_slots(ntuple(i -> df[!, i], ncol(df)), Val(true), groups, false, false)
     rperm, starts, stops = compute_indices(groups, ngroups)
     return RowGroupDict(df, rhashes, gslots, groups, rperm, starts, stops)
 end
